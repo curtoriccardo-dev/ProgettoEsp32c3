@@ -10,22 +10,25 @@ const char* ssid     = "iPhone di Riky";
 const char* password = "A12345678";
 
 // Lista IP candidati per il Broker MQTT Locale
-// Il codice prova automaticamente l'IP Wi-Fi Hotspot (172.20.10.13) e l'IP Ethernet (192.168.25.212)
+// 172.20.10.13: IP del PC quando connesso a Hotspot iPhone
+// 192.168.25.212: IP del PC quando connesso alla rete Ethernet/Wi-Fi
 const char* mqtt_candidates[] = { "172.20.10.13", "192.168.25.212" };
 const int num_candidates = sizeof(mqtt_candidates) / sizeof(mqtt_candidates[0]);
 int currentCandidateIndex = 0;
 const int mqtt_port = 1883;
 const char* client_id = "ESP32C3_Riky_UltraFast";
 
-// Topic MQTT
-const char* topic_status    = "riky_esp32/status";
-const char* topic_commands  = "riky_esp32/commands";
-const char* topic_telemetry = "riky_esp32/telemetry";
+// Topic MQTT per IoT MQTT Panel & Controller
+const char* topic_commands  = "riky_esp32/commands";   // Invia qui ON, OFF, TOGGLE, BLINK
+const char* topic_led_state = "riky_esp32/led";        // Stato semplice per Switch Widget: "ON" o "OFF"
+const char* topic_status    = "riky_esp32/status";     // Stato completo JSON + LWT
+const char* topic_telemetry = "riky_esp32/telemetry";  // Telemetria completa JSON
+const char* topic_rssi      = "riky_esp32/rssi";       // Valore semplice RSSI (es. "-55 dBm")
+const char* topic_uptime    = "riky_esp32/uptime";     // Valore semplice Uptime (es. "45 sec")
 const char* topic_ping      = "riky_esp32/ping";
 const char* topic_pong      = "riky_esp32/pong";
 
-// Configurazione Hardware LED ESP32-C3
-// Su quasi tutti i moduli ESP32-C3 (SuperMini / DevKit) il LED integrato e' sul GPIO 8 (attivo LOW)
+// Configurazione Hardware LED ESP32-C3 (GPIO 8 attivo LOW)
 #define LED_PIN 8
 #define LED_ACTIVE_LOW true
 
@@ -40,7 +43,7 @@ unsigned long lastMqttRetry = 0;
 unsigned long lastWifiRetry = 0;
 int counter = 0;
 
-// Macchina a stati per il lampeggio non-bloccante (Blink)
+// Macchina a stati per lampeggio non-bloccante
 int  blinkRemaining = 0;
 unsigned long blinkInterval = 200;
 unsigned long lastBlinkToggle = 0;
@@ -59,10 +62,14 @@ void applyLedHardware(bool on) {
 
 void setLed(bool on, bool publishUpdate = true) {
   currentLedState = on;
-  blinkRemaining = 0; // Se c'era un lampeggio attivo, interrompilo
+  blinkRemaining = 0;
   applyLedHardware(currentLedState);
 
   if (publishUpdate && client.connected()) {
+    // 1. Pubblica su topic dedicato per lo switch di IoT MQTT Panel (retained = true)
+    client.publish(topic_led_state, on ? "ON" : "OFF", true);
+
+    // 2. Pubblica anche su topic di stato JSON
     char stat[64];
     snprintf(stat, sizeof(stat), "{\"led\":\"%s\",\"state\":%d}", on ? "ON" : "OFF", on ? 1 : 0);
     client.publish(topic_status, stat);
@@ -70,7 +77,7 @@ void setLed(bool on, bool publishUpdate = true) {
 }
 
 void startBlink(int count, unsigned long intervalMs = 200) {
-  blinkRemaining = count * 2; // Ogni lampeggio ha 2 transizioni (ON e OFF)
+  blinkRemaining = count * 2;
   blinkInterval = intervalMs;
   lastBlinkToggle = millis();
   blinkCurrentPhysical = true;
@@ -79,9 +86,14 @@ void startBlink(int count, unsigned long intervalMs = 200) {
 
 void publishFullStatus() {
   if (!client.connected()) return;
+
+  // Pubblica stato LED retained
+  client.publish(topic_led_state, currentLedState ? "ON" : "OFF", true);
+
+  // Pubblica stato JSON
   char buf[220];
   snprintf(buf, sizeof(buf),
-    "{\"status\":\"online\",\"firmware\":\"2.1.1-SmartIP\",\"broker\":\"%s\",\"led\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,\"heap\":%lu}",
+    "{\"status\":\"online\",\"firmware\":\"2.2.0-IoTPanel\",\"broker\":\"%s\",\"led\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,\"heap\":%lu}",
     mqtt_candidates[currentCandidateIndex],
     currentLedState ? "ON" : "OFF",
     WiFi.localIP().toString().c_str(),
@@ -92,7 +104,7 @@ void publishFullStatus() {
 }
 
 // ==========================================
-// CALLBACK MQTT: ESECUZIONE SUB-MILLISECONDO
+// CALLBACK MQTT
 // ==========================================
 void callback(char* topic, byte* payload, unsigned int length) {
   char msg[128];
@@ -100,7 +112,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   memcpy(msg, payload, len);
   msg[len] = '\0';
 
-  // 1. GESTIONE TEST DI LATENZA PING / PONG
+  // Test di latenza
   if (strcmp(topic, topic_ping) == 0) {
     char pongBuf[128];
     snprintf(pongBuf, sizeof(pongBuf), "{\"pong\":\"%s\",\"esp_uptime_ms\":%lu}", msg, millis());
@@ -108,13 +120,12 @@ void callback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  // 2. GESTIONE COMANDI
   Serial.print("[MQTT Ricevuto] ");
   Serial.print(topic);
   Serial.print(" -> ");
   Serial.println(msg);
 
-  // Parsing comandi semplici o JSON
+  // Comandi da IoT MQTT Panel (ON, OFF, TOGGLE, BLINK)
   if (strcasecmp(msg, "ON") == 0 || strcmp(msg, "1") == 0 || strstr(msg, "\"ON\"") != NULL) {
     setLed(true);
     Serial.println("[LED] => ACCESO");
@@ -143,7 +154,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     publishFullStatus();
   } 
   else if (strcasecmp(msg, "REBOOT") == 0) {
-    Serial.println("[SISTEMA] Riavvio richiesto via MQTT...");
+    Serial.println("[SISTEMA] Riavvio richiesto...");
     client.publish(topic_status, "{\"status\":\"rebooting\"}");
     delay(200);
     ESP.restart();
@@ -157,7 +168,7 @@ void ensureMqttConnected() {
   if (client.connected()) return;
 
   unsigned long now = millis();
-  if (now - lastMqttRetry > 2000) { // Tentativo ogni 2 secondi
+  if (now - lastMqttRetry > 2000) {
     lastMqttRetry = now;
     const char* server_to_try = mqtt_candidates[currentCandidateIndex];
     client.setServer(server_to_try, mqtt_port);
@@ -170,15 +181,15 @@ void ensureMqttConnected() {
     bool will_retain = true;
 
     if (client.connect(client_id, will_topic, will_qos, will_retain, will_payload)) {
-      Serial.printf(" CONNESSO CON SUCCESSO a %s!\n", server_to_try);
+      Serial.printf(" CONNESSO A %s!\n", server_to_try);
       
       client.subscribe(topic_commands, 1);
       client.subscribe(topic_ping, 0);
 
       publishFullStatus();
-      Serial.println("[MQTT] Topic sottoscritti con successo.");
+      Serial.println("[MQTT] Iscrizione completata.");
     } else {
-      Serial.printf(" Errore rc=%d. Provo il prossimo IP candidato...\n", client.state());
+      Serial.printf(" Errore rc=%d. Provo il prossimo IP...\n", client.state());
       currentCandidateIndex = (currentCandidateIndex + 1) % num_candidates;
     }
   }
@@ -194,11 +205,11 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("\n==============================================");
-  Serial.println("   ESP32-C3 Local MQTT System - UltraFast     ");
-  Serial.println("   Version 2.1.1 - Smart IP Auto-Failover     ");
+  Serial.println("   ESP32-C3 MQTT Client for IoT MQTT Panel    ");
+  Serial.println("   Version 2.2.0 - Multi-Topic Ready         ");
   Serial.println("==============================================");
 
-  // OTTIMIZZAZIONE WI-FI: disattivazione risparmio energetico
+  // OTTIMIZZAZIONE WI-FI: Disattiva sleep per latenza < 5ms
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(ssid, password);
@@ -215,11 +226,11 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\n[WiFi] Connesso con successo!");
-    Serial.print("[WiFi] IP Assegnato all'ESP32: ");
+    Serial.print("[WiFi] IP ESP32: ");
     Serial.println(WiFi.localIP());
 
     if (MDNS.begin("esp32-riky")) {
-      Serial.println("[mDNS] Host attivo su: esp32-riky.local");
+      Serial.println("[mDNS] Host: esp32-riky.local");
     }
   } else {
     Serial.println("\n[WiFi] In attesa di segnale... continuera' in background.");
@@ -236,7 +247,7 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // 1. GESTIONE LAMPEGGIO NON-BLOCCANTE
+  // 1. LAMPEGGIO NON-BLOCCANTE
   if (blinkRemaining > 0) {
     if (now - lastBlinkToggle >= blinkInterval) {
       lastBlinkToggle = now;
@@ -249,26 +260,36 @@ void loop() {
     }
   }
 
-  // 2. GESTIONE WI-FI E MQTT
+  // 2. WI-FI E MQTT LOOP
   if (WiFi.status() == WL_CONNECTED) {
     ensureMqttConnected();
     client.loop();
 
-    // Invio telemetria ogni 3 secondi
+    // Invio telemetria ogni 3 secondi (compatibile con IoT MQTT Panel)
     if (client.connected() && (now - lastMsg >= 3000)) {
       lastMsg = now;
+
+      // Telemetria completa JSON
       char payload[180];
       snprintf(payload, sizeof(payload), 
-        "{\"uptime\":%lu,\"count\":%d,\"rssi\":%d,\"heap\":%lu,\"led\":\"%s\",\"broker\":\"%s\",\"ip\":\"%s\"}", 
+        "{\"uptime\":%lu,\"count\":%d,\"rssi\":%d,\"heap\":%lu,\"led\":\"%s\",\"ip\":\"%s\"}", 
         now / 1000, 
         counter++, 
         WiFi.RSSI(), 
         (unsigned long)ESP.getFreeHeap(),
         currentLedState ? "ON" : "OFF",
-        mqtt_candidates[currentCandidateIndex],
         WiFi.localIP().toString().c_str()
       );
       client.publish(topic_telemetry, payload);
+
+      // Topic semplici per widget immediati su IoT MQTT Panel:
+      char rssiStr[16];
+      snprintf(rssiStr, sizeof(rssiStr), "%d dBm", WiFi.RSSI());
+      client.publish(topic_rssi, rssiStr);
+
+      char upStr[16];
+      snprintf(upStr, sizeof(upStr), "%lu s", now / 1000);
+      client.publish(topic_uptime, upStr);
     }
   } else {
     if (now - lastWifiRetry > 5000) {
