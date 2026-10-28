@@ -5,14 +5,17 @@
 // ==========================================
 // CONFIGURAZIONE RETE E BROKER MQTT
 // ==========================================
-// Credenziali Wi-Fi (Modifica se necessario)
+// Credenziali Wi-Fi (Hotspot iPhone / Rete)
 const char* ssid     = "iPhone di Riky";
 const char* password = "A12345678";
 
-// Broker MQTT Locale (IP del PC su cui gira NanoMQ)
-const char* mqtt_server = "192.168.25.212"; 
-const int   mqtt_port   = 1883;
-const char* client_id   = "ESP32C3_Riky_UltraFast";
+// Lista IP candidati per il Broker MQTT Locale
+// Il codice prova automaticamente l'IP Wi-Fi Hotspot (172.20.10.13) e l'IP Ethernet (192.168.25.212)
+const char* mqtt_candidates[] = { "172.20.10.13", "192.168.25.212" };
+const int num_candidates = sizeof(mqtt_candidates) / sizeof(mqtt_candidates[0]);
+int currentCandidateIndex = 0;
+const int mqtt_port = 1883;
+const char* client_id = "ESP32C3_Riky_UltraFast";
 
 // Topic MQTT
 const char* topic_status    = "riky_esp32/status";
@@ -76,9 +79,10 @@ void startBlink(int count, unsigned long intervalMs = 200) {
 
 void publishFullStatus() {
   if (!client.connected()) return;
-  char buf[192];
+  char buf[220];
   snprintf(buf, sizeof(buf),
-    "{\"status\":\"online\",\"firmware\":\"2.1.0-UltraFast\",\"led\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,\"heap\":%lu}",
+    "{\"status\":\"online\",\"firmware\":\"2.1.1-SmartIP\",\"broker\":\"%s\",\"led\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,\"heap\":%lu}",
+    mqtt_candidates[currentCandidateIndex],
     currentLedState ? "ON" : "OFF",
     WiFi.localIP().toString().c_str(),
     WiFi.RSSI(),
@@ -127,7 +131,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
   else if (strncasecmp(msg, "BLINK", 5) == 0) {
     int blinks = 3;
     int interval = 200;
-    // Supporto formato "BLINK:5:100" o "BLINK:5"
     if (strlen(msg) > 6 && msg[5] == ':') {
       sscanf(msg + 6, "%d:%d", &blinks, &interval);
       if (blinks <= 0) blinks = 3;
@@ -148,38 +151,35 @@ void callback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ==========================================
-// RICONNESSIONE NON BLOCCANTE CON LWT
+// RICONNESSIONE NON BLOCCANTE CON CANDIDATI IP & LWT
 // ==========================================
 void ensureMqttConnected() {
   if (client.connected()) return;
 
   unsigned long now = millis();
-  if (now - lastMqttRetry > 2000) { // Tentativo ogni 2 secondi senza bloccare
+  if (now - lastMqttRetry > 2000) { // Tentativo ogni 2 secondi
     lastMqttRetry = now;
-    Serial.print("[MQTT] Connessione a ");
-    Serial.print(mqtt_server);
-    Serial.print("...");
+    const char* server_to_try = mqtt_candidates[currentCandidateIndex];
+    client.setServer(server_to_try, mqtt_port);
 
-    // LWT (Last Will and Testament): se l'ESP32 perde improvvisamente la connessione,
-    // il broker pubblichera' in automatico questo messaggio!
+    Serial.printf("[MQTT] Connessione a %s:%d...", server_to_try, mqtt_port);
+
     const char* will_topic = topic_status;
     const char* will_payload = "{\"status\":\"offline\",\"reason\":\"lwt_disconnect\"}";
     int will_qos = 1;
     bool will_retain = true;
 
     if (client.connect(client_id, will_topic, will_qos, will_retain, will_payload)) {
-      Serial.println(" CONNESSO!");
+      Serial.printf(" CONNESSO CON SUCCESSO a %s!\n", server_to_try);
       
-      // Iscrizione ai topic di comando e ping
       client.subscribe(topic_commands, 1);
       client.subscribe(topic_ping, 0);
 
-      // Notifica stato online
       publishFullStatus();
       Serial.println("[MQTT] Topic sottoscritti con successo.");
     } else {
-      Serial.print(" Errore rc=");
-      Serial.println(client.state());
+      Serial.printf(" Errore rc=%d. Provo il prossimo IP candidato...\n", client.state());
+      currentCandidateIndex = (currentCandidateIndex + 1) % num_candidates;
     }
   }
 }
@@ -189,17 +189,16 @@ void ensureMqttConnected() {
 // ==========================================
 void setup() {
   pinMode(LED_PIN, OUTPUT);
-  setLed(false, false); // Spento all'avvio
+  setLed(false, false);
 
   Serial.begin(115200);
   delay(300);
   Serial.println("\n==============================================");
   Serial.println("   ESP32-C3 Local MQTT System - UltraFast     ");
-  Serial.println("   Version 2.1.0 - Zero Latency Engine       ");
+  Serial.println("   Version 2.1.1 - Smart IP Auto-Failover     ");
   Serial.println("==============================================");
 
   // OTTIMIZZAZIONE WI-FI: disattivazione risparmio energetico
-  // Garantisce latenza costante < 5ms sui socket TCP/IP
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(ssid, password);
@@ -216,19 +215,16 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\n[WiFi] Connesso con successo!");
-    Serial.print("[WiFi] IP Assegnato: ");
+    Serial.print("[WiFi] IP Assegnato all'ESP32: ");
     Serial.println(WiFi.localIP());
 
-    // mDNS: Permette di accedere usando "esp32-riky.local"
     if (MDNS.begin("esp32-riky")) {
       Serial.println("[mDNS] Host attivo su: esp32-riky.local");
     }
   } else {
-    Serial.println("\n[WiFi] In attesa di segnale... riconnessione attiva in background.");
+    Serial.println("\n[WiFi] In attesa di segnale... continuera' in background.");
   }
 
-  // Configurazione buffer e parametri MQTT
-  client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
   client.setBufferSize(768);
   client.setKeepAlive(30);
@@ -248,7 +244,6 @@ void loop() {
       applyLedHardware(blinkCurrentPhysical);
       blinkRemaining--;
       if (blinkRemaining == 0) {
-        // Ripristina stato logico originale al termine
         applyLedHardware(currentLedState);
       }
     }
@@ -257,25 +252,25 @@ void loop() {
   // 2. GESTIONE WI-FI E MQTT
   if (WiFi.status() == WL_CONNECTED) {
     ensureMqttConnected();
-    client.loop(); // Processamento pacchetti istantaneo
+    client.loop();
 
-    // Invio telemetria periodica (ogni 3 secondi)
+    // Invio telemetria ogni 3 secondi
     if (client.connected() && (now - lastMsg >= 3000)) {
       lastMsg = now;
-      char payload[160];
+      char payload[180];
       snprintf(payload, sizeof(payload), 
-        "{\"uptime\":%lu,\"count\":%d,\"rssi\":%d,\"heap\":%lu,\"led\":\"%s\",\"ip\":\"%s\"}", 
+        "{\"uptime\":%lu,\"count\":%d,\"rssi\":%d,\"heap\":%lu,\"led\":\"%s\",\"broker\":\"%s\",\"ip\":\"%s\"}", 
         now / 1000, 
         counter++, 
         WiFi.RSSI(), 
         (unsigned long)ESP.getFreeHeap(),
         currentLedState ? "ON" : "OFF",
+        mqtt_candidates[currentCandidateIndex],
         WiFi.localIP().toString().c_str()
       );
       client.publish(topic_telemetry, payload);
     }
   } else {
-    // Riconnessione Wi-Fi non bloccante
     if (now - lastWifiRetry > 5000) {
       lastWifiRetry = now;
       Serial.println("[WiFi] Tentativo riconnessione Wi-Fi in corso...");

@@ -3,10 +3,10 @@ title Caricamento Firmware su ESP32-C3
 chcp 65001 >nul
 cls
 
-echo ==========================================================
-echo       CARICAMENTO FIRMWARE ESP32-C3 (ZERO IDE)            
-echo ==========================================================
-echo.
+set "BASE_DIR=%~dp0"
+if not exist "%BASE_DIR%esp32_mqtt\esp32_mqtt.ino" (
+    set "BASE_DIR=C:\Users\curto.riccardo\esp32-mqtt-broker\"
+)
 
 set "CLI_PATH=C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe"
 if not exist "%CLI_PATH%" (
@@ -21,6 +21,11 @@ if not exist "%CLI_PATH%" (
     )
 )
 
+echo ==========================================================
+echo       CARICAMENTO FIRMWARE ESP32-C3 (ZERO IDE)            
+echo ==========================================================
+echo.
+
 echo [1/3] Rilevamento porta seriale ESP32-C3...
 set "COMPORT=COM5"
 for /f "tokens=1" %%i in ('"%CLI_PATH%" board list ^| findstr /i "esp32"') do (
@@ -30,7 +35,7 @@ echo      Porta rilevata: %COMPORT%
 echo.
 
 echo [2/3] Compilazione firmware ottimizzato per ESP32-C3...
-"%CLI_PATH%" compile --fqbn esp32:esp32:esp32c3 "%~dp0esp32_mqtt"
+"%CLI_PATH%" compile --fqbn esp32:esp32:esp32c3 "%BASE_DIR%esp32_mqtt"
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [!] Errore durante la compilazione!
@@ -41,7 +46,7 @@ echo      Compilazione completata con successo!
 echo.
 
 echo [3/3] Caricamento su ESP32-C3 (%COMPORT%)...
-"%CLI_PATH%" upload -p %COMPORT% --fqbn esp32:esp32:esp32c3 "%~dp0esp32_mqtt"
+"%CLI_PATH%" upload -p %COMPORT% --fqbn esp32:esp32:esp32c3 "%BASE_DIR%esp32_mqtt"
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo ==========================================================
