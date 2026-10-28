@@ -1,0 +1,22 @@
+# Gitignore for ESP32 Local MQTT Broker Project
+
+# Archives
+*.zip
+*.tar.gz
+*.7z
+
+# Temporary / Log files
+*.log
+/tmp/
+logs/
+
+# Arduino build output
+build/
+*.bin
+*.elf
+*.hex
+
+# Operating System files
+.DS_Store
+Thumbs.db
+Desktop.ini
